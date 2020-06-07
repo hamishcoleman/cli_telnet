@@ -53,17 +53,8 @@ sub main {
     my $stdin_fileno = fileno(*STDIN);
     my $sock_fileno = fileno($fh);
 
-    # These hashes hold the source and destination file handles for the
-    # file numbers we use in select()
-    my (%rfds, %wfds);
-    $rfds{$stdin_fileno} = \*STDIN;
-    $rfds{$sock_fileno}  = $fh;
-    $wfds{$stdin_fileno} = $fh;
-    $wfds{$sock_fileno}  = \*STDOUT;
-
     # Set up for select
     my ($rin, $rout, $ein, $eout);
-
     $rin = "";
     vec($rin, $stdin_fileno, 1) = 1;
     vec($rin,  $sock_fileno, 1) = 1;
@@ -82,13 +73,14 @@ sub main {
         if (vec($eout, $stdin_fileno, 1)) { last SELECT; }
         if (vec($eout, $sock_fileno, 1)) { last SELECT; }
 
-        foreach my $key (keys(%rfds)) {
-            # skip if not flagged
-            next if (!vec($rout, $key, 1));
-
-            do_copy($rfds{$key}, $wfds{$key}) || last SELECT;
+        if (vec($rout, $stdin_fileno, 1)) {
+            # reading from user
+            do_copy(\*STDIN, $fh) || last SELECT;
         }
-        # next SELECT;
+        if (vec($rout, $sock_fileno, 1)) {
+            # reading from network
+            do_copy($fh, \*STDOUT) || last SELECT;
+        }
     }
 
     $fh->close();
