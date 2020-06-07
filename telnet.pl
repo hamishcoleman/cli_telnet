@@ -54,30 +54,31 @@ sub main {
     my $sock_fileno = fileno($fh);
 
     # Set up for select
-    my ($rin, $rout, $ein, $eout);
-    $rin = "";
-    vec($rin, $stdin_fileno, 1) = 1;
-    vec($rin,  $sock_fileno, 1) = 1;
-    $ein = $rin;
+    my $readfds_init = "";
+    vec($readfds_init, $stdin_fileno, 1) = 1;
+    vec($readfds_init,  $sock_fileno, 1) = 1;
+    my $exceptfds_init = $readfds_init;
 
     # Loop, reading from one socket and writing to the other like a good
     # proxy program
     SELECT:
     while(1) {
-        my $nfound = select($rout = $rin, undef, $eout = $ein, 1024);
+        my $readfds = $readfds_init;
+        my $exceptfds = $exceptfds_init;
+        my $nfound = select($readfds, undef, $exceptfds, 1024);
         if ($nfound == 0) {
             next;
         }
 
         # if either these have their error flag set, exit
-        if (vec($eout, $stdin_fileno, 1)) { last SELECT; }
-        if (vec($eout, $sock_fileno, 1)) { last SELECT; }
+        if (vec($exceptfds, $stdin_fileno, 1)) { last SELECT; }
+        if (vec($exceptfds, $sock_fileno, 1)) { last SELECT; }
 
-        if (vec($rout, $stdin_fileno, 1)) {
+        if (vec($readfds, $stdin_fileno, 1)) {
             # reading from user
             do_copy(\*STDIN, $fh) || last SELECT;
         }
-        if (vec($rout, $sock_fileno, 1)) {
+        if (vec($readfds, $sock_fileno, 1)) {
             # reading from network
             do_copy($fh, \*STDOUT) || last SELECT;
         }
