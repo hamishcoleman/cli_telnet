@@ -7,6 +7,9 @@ use strict;
 use Socket;
 use FileHandle;
 
+# FIXME: install a whole library for one function?
+use Term::ReadKey;
+
 sub do_connect {
     my $host = shift;
     my $port = shift;
@@ -52,6 +55,9 @@ sub handle_telnet_options {
     # WILL gets a DO reply
     #
     # There are a couple of options we do want to handle though
+    #
+    # TODO:
+    # - local echo
 
     while (ord(substr($buf,0,1)) == 0xff) {
         my $cmd = ord(substr($buf,1,1));
@@ -104,6 +110,11 @@ sub main {
 
     my $fh = do_connect($host, $port);
 
+    # TODO:
+    # - optionally do not turn on raw mode
+    # - allow missing Term::Readkey library
+    ReadMode('raw');
+
     my $stdin_fileno = fileno(*STDIN);
     my $sock_fileno = fileno($fh);
 
@@ -135,6 +146,11 @@ sub main {
             length($buf) || last SELECT;
 
             # if buf contains local interrupt, handle that
+            if (ord(substr($buf,0,1)) == 0x1d) {
+                # TODO:
+                # - local menu
+                last SELECT;
+            }
 
             syswrite_all($fh, $buf) || last SELECT;
         }
@@ -156,6 +172,7 @@ sub main {
 
     $fh->close();
 
+    ReadMode(0);
     exit(0);
 }
 unless(caller) { main(); }
