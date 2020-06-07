@@ -50,28 +50,33 @@ sub main {
 
     my $fh = do_connect($host, $port);
 
+    my $stdin_fileno = fileno(*STDIN);
+    my $sock_fileno = fileno($fh);
+
     # These hashes hold the source and destination file handles for the
     # file numbers we use in select()
     my (%rfds, %wfds);
-    my ($stdin_fileno, $sock_fileno) = (fileno(*STDIN), fileno($fh));
     $rfds{$stdin_fileno} = \*STDIN;
     $rfds{$sock_fileno}  = $fh;
     $wfds{$stdin_fileno} = $fh;
     $wfds{$sock_fileno}  = \*STDOUT;
 
     # Set up for select
-    my $rin = "";
+    my ($rin, $rout, $ein, $eout);
+
+    $rin = "";
     vec($rin, $stdin_fileno, 1) = 1;
     vec($rin,  $sock_fileno, 1) = 1;
-    my $ein = $rin;
-
-    my ($rout, $eout);
+    $ein = $rin;
 
     # Loop, reading from one socket and writing to the other like a good
     # proxy program
-    SELECT: while(1) {
+    SELECT:
+    while(1) {
       my $nfound = select($rout = $rin, undef, $eout = $ein, 1024);
-      $nfound || next SELECT;
+        if ($nfound == 0) {
+            next;
+        }
 
       (vec($eout, $stdin_fileno, 1) || vec($eout, $sock_fileno, 1)) && last SELECT;
 
