@@ -7,6 +7,25 @@ use strict;
 use Socket;
 use FileHandle;
 
+sub do_connect {
+    my $host = shift;
+    my $port = shift;
+
+    my $ipaddr   = inet_aton($host);
+    my $sockaddr = sockaddr_in($port, $ipaddr);
+    my $proto = getprotobyname('tcp');
+    my $fh    = new FileHandle;
+
+    if (!socket($fh, PF_INET, SOCK_STREAM, $proto)) {
+            die "socket error";
+    }
+    if (!connect($fh, $sockaddr)) {
+            die "connect error";
+    }
+    $fh->autoflush(1);
+    return $fh;
+}
+
 # Copy stuff from one filehandle to another
 sub do_copy {
   my($pIn, $pOut) = @_;
@@ -29,18 +48,7 @@ sub main {
     my $host = shift @ARGV || die "Remote host not supplied";;
     my $port = shift @ARGV || 23;
 
-    my $ipaddr   = inet_aton($host);
-    my $sockaddr = sockaddr_in($port, $ipaddr);
-    my $proto = getprotobyname('tcp');
-    my $fh    = new FileHandle;
-
-    if (!socket($fh, PF_INET, SOCK_STREAM, $proto)) {
-            die "socket error";
-    }
-    if (!connect($fh, $sockaddr)) {
-            die "connect error";
-    }
-    $fh->autoflush(1);
+    my $fh = do_connect($host, $port);
 
     # These hashes hold the source and destination file handles for the
     # file numbers we use in select()
