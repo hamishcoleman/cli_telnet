@@ -47,8 +47,11 @@ sub handle_telnet_options {
     # A really simple option processor.  Some servers just dont continue on
     # to sending normal data until you complete a negotiation..
     #
+    # The defaults are simple.
     # Any request from them to DO gets a WONT reply, but any info that they
     # WILL gets a DO reply
+    #
+    # There are a couple of options we do want to handle though
 
     while (ord(substr($buf,0,1)) == 0xff) {
         my $cmd = ord(substr($buf,1,1));
@@ -58,18 +61,37 @@ sub handle_telnet_options {
             # They are asking us to "DO (option code)"
             $prefixsize ++;
 
-            # just say we "WON'T (option code)"
-            my $reply = "\xff" . chr(252) . chr($option);
-            syswrite($$fh, $reply, 3);
+            my $reply;
+            if ($option == 0x18) {
+                # Will Terminal Type
+                $reply = "\xff" . chr(251) . chr($option);
+            } else {
+                # just say we "WON'T (option code)"
+                $reply = "\xff" . chr(252) . chr($option);
+            }
+            syswrite($$fh, $reply);
         } elsif ($cmd == 251) {
             # They are telling they "WILL (option code)"
             $prefixsize ++;
 
             # Just agree with "DO (option code)"
             my $reply = "\xff" . chr(253) . chr($option);
-            syswrite($$fh, $reply, 3);
-        } else {
-            ...
+            syswrite($$fh, $reply);
+        } elsif ($cmd == 250) {
+            # suboption start
+            if ($option == 0x18) {
+                my $param = ord(substr($buf,3,1));
+                $prefixsize ++;
+
+                if ($param != 1) {
+                    ...
+                }
+                # hardcode the terminal type
+                my $reply = "\xff\xfa\x18\x00xterm\xff\xf0";
+                syswrite($$fh, $reply);
+            } else {
+                ...
+            }
         }
         $buf = substr($buf, $prefixsize);
     }
