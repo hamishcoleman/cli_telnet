@@ -78,12 +78,14 @@ sub main {
             next;
         }
 
+        # if either these have their error flag set, exit
         (vec($eout, $stdin_fileno, 1) || vec($eout, $sock_fileno, 1)) && last SELECT;
 
         foreach my $key (keys(%rfds)) {
-            if(vec($rout, $key, 1)) {
-                do_copy($rfds{$key}, $wfds{$key}) || last SELECT;
-            }
+            # skip if not flagged
+            next if (!vec($rout, $key, 1));
+
+            do_copy($rfds{$key}, $wfds{$key}) || last SELECT;
         }
         # next SELECT;
     }
