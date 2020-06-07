@@ -26,24 +26,6 @@ sub do_connect {
     return $fh;
 }
 
-# Copy stuff from one filehandle to another
-sub do_copy {
-  my($pIn, $pOut) = @_;
-  my ($buf, $len, $offset, $br);
-  
-  $len = sysread($$pIn, $buf, 1024);
-  $len || return 0;
-
-  $offset = 0;
-  while($len)  {
-    $br = syswrite($$pOut, $buf, $len, $offset);
-    $br || return 0;
-    $offset += $br;
-    $len    -= $br;
-  }
-  return 1;
-}
-
 sub syswrite_all {
     my $fh = shift;
     my $buf = shift;
@@ -57,6 +39,41 @@ sub syswrite_all {
         $len    -= $written;
     }
     return 1;
+}
+
+sub handle_telnet_options {
+    my $fh = shift;
+    my $buf = shift;
+    # A really simple option processor.  Some servers just dont continue on
+    # to sending normal data until you complete a negotiation..
+    #
+    # Any request from them to DO gets a WONT reply, but any info that they
+    # WILL gets a DO reply
+
+    while (ord(substr($buf,0,1)) == 0xff) {
+        my $cmd = ord(substr($buf,1,1));
+        my $option = ord(substr($buf,2,1));
+        my $prefixsize = 2;
+        if ($cmd == 253) {
+            # They are asking us to "DO (option code)"
+            $prefixsize ++;
+
+            # just say we "WON'T (option code)"
+            my $reply = "\xff" . chr(252) . chr($option);
+            syswrite($$fh, $reply, 3);
+        } elsif ($cmd == 251) {
+            # They are telling they "WILL (option code)"
+            $prefixsize ++;
+
+            # Just agree with "DO (option code)"
+            my $reply = "\xff" . chr(253) . chr($option);
+            syswrite($$fh, $reply, 3);
+        } else {
+            ...
+        }
+        $buf = substr($buf, $prefixsize);
+    }
+    return $buf;
 }
 
 sub main {
@@ -106,6 +123,10 @@ sub main {
             length($buf) || last SELECT;
 
             # if buf contains telnet options, handle them
+            # (cheat by assuming they are all at the start of a packet)
+            if (ord(substr($buf,0,1)) == 0xff) {
+                $buf = handle_telnet_options($fh, $buf);
+            }
 
             syswrite_all(\*STDOUT, $buf) || last SELECT;
         }
