@@ -26,11 +26,8 @@ sub do_copy {
 }
 
 sub main {
-    my $host = $ARGV[0];
-    my $port = $ARGV[1];
-
-    $host || die "Remote host not supplied";
-    $port || ($port=23);
+    my $host = shift @ARGV || die "Remote host not supplied";;
+    my $port = shift @ARGV || 23;
 
     my $ipaddr   = inet_aton($host);
     my $sockaddr = sockaddr_in($port, $ipaddr);
