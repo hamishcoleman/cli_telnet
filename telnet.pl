@@ -79,7 +79,8 @@ sub main {
         }
 
         # if either these have their error flag set, exit
-        (vec($eout, $stdin_fileno, 1) || vec($eout, $sock_fileno, 1)) && last SELECT;
+        if (vec($eout, $stdin_fileno, 1)) { last SELECT; }
+        if (vec($eout, $sock_fileno, 1)) { last SELECT; }
 
         foreach my $key (keys(%rfds)) {
             # skip if not flagged
