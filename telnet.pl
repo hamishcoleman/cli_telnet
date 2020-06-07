@@ -73,19 +73,19 @@ sub main {
     # proxy program
     SELECT:
     while(1) {
-      my $nfound = select($rout = $rin, undef, $eout = $ein, 1024);
+        my $nfound = select($rout = $rin, undef, $eout = $ein, 1024);
         if ($nfound == 0) {
             next;
         }
 
-      (vec($eout, $stdin_fileno, 1) || vec($eout, $sock_fileno, 1)) && last SELECT;
+        (vec($eout, $stdin_fileno, 1) || vec($eout, $sock_fileno, 1)) && last SELECT;
 
-      foreach my $key (keys(%rfds)) {
-        if(vec($rout, $key, 1)) {
-          do_copy($rfds{$key}, $wfds{$key}) || last SELECT;
+        foreach my $key (keys(%rfds)) {
+            if(vec($rout, $key, 1)) {
+                do_copy($rfds{$key}, $wfds{$key}) || last SELECT;
+            }
         }
-      }
-      # next SELECT;
+        # next SELECT;
     }
 
     $fh->close();
