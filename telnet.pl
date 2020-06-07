@@ -44,6 +44,21 @@ sub do_copy {
   return 1;
 }
 
+sub syswrite_all {
+    my $fh = shift;
+    my $buf = shift;
+
+    my $len = length($buf);
+    my $offset = 0;
+    while($len)  {
+        my $written = syswrite($$fh, $buf, $len, $offset);
+        $written || return 0;
+        $offset += $written;
+        $len    -= $written;
+    }
+    return 1;
+}
+
 sub main {
     my $host = shift @ARGV || die "Remote host not supplied";;
     my $port = shift @ARGV || 23;
@@ -76,11 +91,23 @@ sub main {
 
         if (vec($readfds, $stdin_fileno, 1)) {
             # reading from user
-            do_copy(\*STDIN, $fh) || last SELECT;
+            my $buf;
+            sysread(\*STDIN, $buf, 1024);
+            length($buf) || last SELECT;
+
+            # if buf contains local interrupt, handle that
+
+            syswrite_all($fh, $buf) || last SELECT;
         }
         if (vec($readfds, $sock_fileno, 1)) {
             # reading from network
-            do_copy($fh, \*STDOUT) || last SELECT;
+            my $buf;
+            sysread($fh, $buf, 1024);
+            length($buf) || last SELECT;
+
+            # if buf contains telnet options, handle them
+
+            syswrite_all(\*STDOUT, $buf) || last SELECT;
         }
     }
 
