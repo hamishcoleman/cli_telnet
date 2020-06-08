@@ -265,8 +265,9 @@ sub read_local {
 
 sub read_remote {
     my $self = shift;
+    my $buflen = shift || 1024;
     my $buf;
-    sysread($self->{remote}, $buf, 1024);
+    sysread($self->{remote}, $buf, $buflen);
     return $buf;
 }
 
@@ -355,7 +356,56 @@ package main;
 use warnings;
 use strict;
 
+use FileHandle;
+
 my $menu_entries;
+
+sub menu_send_check_echo {
+    my $conn = shift;
+    $conn->write_local("filename? ");
+    my $filename = $conn->read_local();
+    chomp($filename);
+
+    my $fh = FileHandle->new($filename, "r");
+    if (!defined($fh)) {
+        $conn->write_local("Could not open\n");
+        return 1;
+    }
+
+    $conn->write_local("---sending---\n");
+    while (!$fh->eof()) {
+        my $ch = $fh->getc();
+        if (!defined($ch)) {
+            $conn->write_local("---done---\n");
+            return 1;
+        }
+
+        # HACK!
+        if ($ch eq "\n") {
+            $ch = "\r";
+        }
+
+        $conn->write_remote($ch) || return 0;
+NL:
+        my $rx = $conn->read_remote(1);
+        if (length($rx) == 0) {
+            $conn->write_local("---ZEROREAD---\n");
+            return 1;
+        }
+        $conn->write_local($rx);
+
+        if ($ch eq "\r") {
+            $ch = "\n";
+            goto NL;
+        }
+
+        if ($ch ne $rx) {
+            $conn->write_local("---MISMATCH---\n");
+            return 1;
+        }
+    }
+    return 1;
+}
 
 sub menu_help {
     my $conn = shift;
@@ -374,6 +424,7 @@ sub menu_quit {
 }
 
 $menu_entries = {
+    send_check_echo => \&menu_send_check_echo,
     help => \&menu_help,
     quit => \&menu_quit,
 };
