@@ -215,6 +215,24 @@ sub syswrite_all {
     return 1;
 }
 
+sub menu {
+    syswrite_all(\*STDOUT, "telnet.pl> ");
+
+    my $buf;
+    sysread(\*STDIN, $buf, 1024);
+
+    chomp $buf;
+    if (!$buf) {
+        return 1;
+    }
+    if ($buf eq 'q') {
+        return 0;
+    }
+    syswrite_all(\*STDOUT, "Invalid command: ".$buf."\n");
+    return 1;
+}
+
+
 sub main {
     my $host = shift @ARGV || die "Remote host not supplied";;
     my $port = shift @ARGV || 23;
@@ -259,10 +277,13 @@ sub main {
             #
             # if buf contains local interrupt, handle that
             if (ord(substr($buf,0,1)) == 0x1d) {
-                # TODO:
-                # - local menu
-                last SELECT;
-            } elsif ($opt_echo && substr($buf,0,1) eq "\n") {
+                ReadMode('restore') if ($opt_echo);
+                menu() || last SELECT;
+                ReadMode('raw') if ($opt_echo);
+                next;
+            }
+
+            if ($opt_echo && substr($buf,0,1) eq "\n") {
                 substr($buf,0,1) = "\r";
             }
 
