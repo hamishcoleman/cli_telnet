@@ -360,7 +360,7 @@ use FileHandle;
 
 my $menu_entries;
 
-sub menu_send_check_echo {
+sub menu_send_chars_check {
     my $conn = shift;
     $conn->write_local("filename? ");
     my $filename = $conn->read_local();
@@ -411,6 +411,96 @@ READ:
     return 1;
 }
 
+sub menu_send_text_check {
+    my $conn = shift;
+    $conn->write_local("maxbuf? ");
+    my $maxbuf = $conn->read_local();
+    chomp($maxbuf);
+    if (!$maxbuf) {
+        $maxbuf = 28;
+        $conn->write_local("maxbuf=$maxbuf\n");
+    }
+
+    $conn->write_local("filename? ");
+    my $filename = $conn->read_local();
+    chomp($filename);
+
+    my $fh = FileHandle->new($filename, "r");
+    if (!defined($fh)) {
+        $conn->write_local("Could not open\n");
+        return 1;
+    }
+
+    $conn->write_local("---sending---\n");
+    while (<$fh>) {
+        my $retries = 0;
+RETRY:
+        $retries ++;
+        if ($retries > 3) {
+            $conn->write_local("---TOOMANY---n");
+            return 1;
+        }
+        my $tosend = $_;
+        chomp($tosend);
+
+        while (length($tosend)) {
+            my $send = substr($tosend, 0, $maxbuf);
+            $conn->write_remote($send) || return 0;
+
+            my $tocheck = $send;
+            while (length($tocheck)) {
+                my $rx = $conn->read_remote();
+                $conn->write_local($rx);
+
+                # HACK
+                # FIXME - it does wierd when line is >80char
+                while (substr($rx, 0, 1) eq "\r") { $rx = substr($rx, 1); }
+                while (substr($rx, 0, 1) eq "\x00") { $rx = substr($rx, 1); }
+                while (substr($rx, 0, 1) eq "\n") { $rx = substr($rx, 1); }
+
+                my $check = substr($tocheck, 0, length($rx));
+                if ($rx ne $check) {
+                    $conn->write_local("---BAD:$check---\n");
+
+                    goto RETRY;
+                    return 1;
+                }
+                $tocheck = substr($tocheck, length($rx));
+            }
+
+            $tosend = substr($tosend, length($send));
+        }
+
+        my $ch = "\r";
+        $conn->write_remote($ch);
+READ:
+        my $rx = $conn->read_remote(1);
+        if (length($rx) == 0) {
+            $conn->write_local("---ZEROREAD---\n");
+            return 1;
+        }
+        if (length($rx) == 1 && ord($rx) == 0) {
+            # sometimes, it sends us nuls..
+            goto READ;
+        }
+
+        $conn->write_local($rx);
+
+        if ($ch ne $rx) {
+            $conn->write_local("---MISMATCH---\n");
+            return 1;
+        }
+
+        if ($ch eq "\r") {
+            $ch = "\n";
+            goto READ;
+        }
+
+    }
+    $conn->write_local("---done---\n");
+    return 1;
+}
+
 sub menu_help {
     my $conn = shift;
 
@@ -428,7 +518,8 @@ sub menu_quit {
 }
 
 $menu_entries = {
-    send_check_echo => \&menu_send_check_echo,
+    send_chars_check => \&menu_send_chars_check,
+    send_text_check=> \&menu_send_text_check,
     help => \&menu_help,
     quit => \&menu_quit,
 };
