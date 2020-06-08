@@ -294,13 +294,13 @@ sub loop {
         }
 
         # if either these have their error flag set, exit
-        return 0 if (vec($exceptfds, $stdin_fileno, 1));
-        return 0 if (vec($exceptfds, $sock_fileno, 1));
+        last if (vec($exceptfds, $stdin_fileno, 1));
+        last if (vec($exceptfds, $sock_fileno, 1));
 
         # reading from user
         if (vec($readfds, $stdin_fileno, 1)) {
             my $buf = $self->read_local();
-            length($buf) || return 0;
+            length($buf) || last;
 
             # Again, we are cheating, since we assume interesting things are
             # only in the first byte
@@ -322,18 +322,18 @@ sub loop {
                 substr($buf,0,1) = "\r";
             }
 
-            $self->write_remote($buf) || return 0;
+            $self->write_remote($buf) || last;
         }
 
         # reading from network
         if (vec($readfds, $sock_fileno, 1)) {
             my $buf = $self->read_remote();
-            length($buf) || return 0;
+            length($buf) || last;
 
             $buf = $self->{options}->parse($buf);
             my $reply = $self->{options}->get_reply();
             if ($reply) {
-                $self->write_remote($reply) || return 0;
+                $self->write_remote($reply) || last;
             }
 
             # After processing options, check if the Echo is now defined
@@ -344,9 +344,11 @@ sub loop {
                 $self->{local_raw} = 1;
             }
 
-            $self->write_local($buf) || return 0;
+            $self->write_local($buf) || last;
         }
     }
+    ReadMode('restore');
+    return 0;
 }
 
 package main;
