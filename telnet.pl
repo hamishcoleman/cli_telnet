@@ -65,7 +65,7 @@ sub handle_telnet_options {
         my $prefixsize = 2;
         if ($cmd == 253) {
             # They are asking us to "DO (option code)"
-            $prefixsize ++;
+            $prefixsize = 3;
 
             my $reply;
             if ($option == 0x18) {
@@ -78,7 +78,7 @@ sub handle_telnet_options {
             syswrite($$fh, $reply);
         } elsif ($cmd == 251) {
             # They are telling they "WILL (option code)"
-            $prefixsize ++;
+            $prefixsize = 3;
 
             # Just agree with "DO (option code)"
             my $reply = "\xff" . chr(253) . chr($option);
@@ -87,7 +87,7 @@ sub handle_telnet_options {
             # suboption start
             if ($option == 0x18) {
                 my $param = ord(substr($buf,3,1));
-                $prefixsize ++;
+                $prefixsize = 4;
 
                 if ($param != 1) {
                     ...
@@ -98,6 +98,15 @@ sub handle_telnet_options {
             } else {
                 ...
             }
+        } elsif ($cmd == 240) {
+            # suboption end
+            # do nothing, just skip it
+
+            # Technically, the suboption param variable (above) should be
+            # constructed of all the bytes between suboption start and end,
+            # but I cheat here.
+        } else {
+            ...
         }
         $buf = substr($buf, $prefixsize);
     }
