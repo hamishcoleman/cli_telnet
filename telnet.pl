@@ -1,8 +1,170 @@
 #!/usr/bin/perl -w
+use warnings;
 use strict;
 #
 # what kind of krazy hardening process removes telnet?
 #
+
+package Telnet::Options;
+use warnings;
+use strict;
+
+sub new {
+    my $class = shift;
+    my $self = {};
+    bless $self, $class;
+    $self->{buf} = '';
+    $self->{bufpos} = 0;
+    $self->{tosend} = '';
+    return $self;
+}
+
+sub _bufset {
+    my $self = shift;
+    $self->{buf} = shift;
+    $self->{bufpos} = 0;
+}
+
+sub _bufinc {
+    my $self = shift;
+    my $inc = shift || 1;
+    $self->{bufpos} += $inc;
+}
+
+sub _bufpeek {
+    my $self = shift;
+    return ord(substr($self->{buf},$self->{bufpos},1));
+}
+
+sub _bufget {
+    my $self = shift;
+    my $ch = $self->_bufpeek();
+    $self->_bufinc();
+    return $ch;
+}
+
+sub _bufret {
+    my $self = shift;
+    return substr($self->{buf}, $self->{bufpos});
+}
+
+sub _send {
+    my $self = shift;
+    for my $i (@_) {
+        $self->{tosend} .= chr($i);
+    }
+}
+
+sub _sendstr {
+    my $self = shift;
+    $self->{tosend} .= shift;
+}
+
+sub get_reply {
+    my $self = shift;
+    my $reply = $self->{tosend};
+    $self->{tosend} = '';
+    return $reply;
+}
+
+use constant {
+    SUBEND   => 240,
+    SUBBEGIN => 250,
+    WILL     => 251,
+    WONT     => 252,
+    DO       => 253,
+    DONT     => 254,
+    IAC      => 255,
+
+    OPT_TERMTYPE => 24,
+};
+
+sub _sub_termtype {
+    my $self = shift;
+    my $cmd = shift;
+
+    if ($cmd != 1) {
+        # 1 == SEND;
+        warn("SUB TERM-TYPE $cmd");
+        ...;
+    }
+
+    # hardcode the terminal type
+    $self->_send(IAC, SUBBEGIN, OPT_TERMTYPE, 0); # 0 == IS
+    $self->_sendstr('xterm');
+    $self->_send(IAC, SUBEND);
+}
+
+sub _IAC_250 { # SUBBEGIN
+    my $self = shift;
+    my $option = $self->_bufget();
+    my @bytes;
+
+    # We assume that no sequence spans a single buffer
+    while ($self->_bufpeek() != IAC) {
+        push @bytes, $self->_bufget();
+    }
+    $self->_bufget(); # Consume the IAC
+
+    # We assume no IAC occurs within the SUB Begin/End block
+    my $end = $self->_bufget();
+    if ($end != SUBEND) {
+        warn("Got IAC $end during SB block");
+        ...;
+    }
+
+    if ($option == OPT_TERMTYPE) {
+        $self->_sub_termtype(@bytes);
+    } else {
+        warn("OPT $option");
+        ...;
+    }
+}
+
+sub _IAC_251 { # WILL
+    my $self = shift;
+    my $option = $self->_bufget();
+
+    $self->_send(IAC, DO, $option);
+}
+
+sub _IAC_253 {  # DO
+    my $self = shift;
+    my $option = $self->_bufget();
+
+    my $reply = WONT;
+    if ($option == OPT_TERMTYPE) {
+        $reply = WILL;
+    }
+
+    $self->_send(IAC, $reply, $option);
+}
+
+sub parse {
+    my $self = shift;
+    $self->_bufset(shift);
+
+    # Assume no midstream IAC sequences - just look at the first byte
+    # We also assume that no sequence spans a single buffer
+
+    while ($self->_bufpeek() == IAC) {
+        $self->_bufget(); # Consume the IAC
+        my $cmd = $self->_bufget();
+        my $method = "_IAC_$cmd";
+
+        if ($self->can($method)) {
+            $self->$method();
+        } else {
+            warn("CMD $cmd");
+            ...
+        }
+    }
+    return $self->_bufret();
+}
+
+package main;
+use warnings;
+use strict;
 
 use Socket;
 use FileHandle;
@@ -44,80 +206,13 @@ sub syswrite_all {
     return 1;
 }
 
-sub handle_telnet_options {
-    my $fh = shift;
-    my $buf = shift;
-    # A really simple option processor.  Some servers just dont continue on
-    # to sending normal data until you complete a negotiation..
-    #
-    # The defaults are simple.
-    # Any request from them to DO gets a WONT reply, but any info that they
-    # WILL gets a DO reply
-    #
-    # There are a couple of options we do want to handle though
-    #
-    # TODO:
-    # - local echo
-
-    while (ord(substr($buf,0,1)) == 0xff) {
-        my $cmd = ord(substr($buf,1,1));
-        my $option = ord(substr($buf,2,1));
-        my $prefixsize = 2;
-        if ($cmd == 253) {
-            # They are asking us to "DO (option code)"
-            $prefixsize = 3;
-
-            my $reply;
-            if ($option == 0x18) {
-                # Will Terminal Type
-                $reply = "\xff" . chr(251) . chr($option);
-            } else {
-                # just say we "WON'T (option code)"
-                $reply = "\xff" . chr(252) . chr($option);
-            }
-            syswrite($$fh, $reply);
-        } elsif ($cmd == 251) {
-            # They are telling they "WILL (option code)"
-            $prefixsize = 3;
-
-            # Just agree with "DO (option code)"
-            my $reply = "\xff" . chr(253) . chr($option);
-            syswrite($$fh, $reply);
-        } elsif ($cmd == 250) {
-            # suboption start
-            if ($option == 0x18) {
-                my $param = ord(substr($buf,3,1));
-                $prefixsize = 4;
-
-                if ($param != 1) {
-                    ...
-                }
-                # hardcode the terminal type
-                my $reply = "\xff\xfa\x18\x00xterm\xff\xf0";
-                syswrite($$fh, $reply);
-            } else {
-                ...
-            }
-        } elsif ($cmd == 240) {
-            # suboption end
-            # do nothing, just skip it
-
-            # Technically, the suboption param variable (above) should be
-            # constructed of all the bytes between suboption start and end,
-            # but I cheat here.
-        } else {
-            ...
-        }
-        $buf = substr($buf, $prefixsize);
-    }
-    return $buf;
-}
-
 sub main {
     my $host = shift @ARGV || die "Remote host not supplied";;
     my $port = shift @ARGV || 23;
 
     my $fh = do_connect($host, $port);
+
+    my $options = Telnet::Options->new();
 
     # TODO:
     # - optionally do not turn on raw mode
@@ -169,10 +264,10 @@ sub main {
             sysread($fh, $buf, 1024);
             length($buf) || last SELECT;
 
-            # if buf contains telnet options, handle them
-            # (cheat by assuming they are all at the start of a packet)
-            if (ord(substr($buf,0,1)) == 0xff) {
-                $buf = handle_telnet_options($fh, $buf);
+            $buf = $options->parse($buf);
+            my $reply = $options->get_reply();
+            if ($reply) {
+                syswrite_all($fh, $reply) || last SELECT;
             }
 
             syswrite_all(\*STDOUT, $buf) || last SELECT;
