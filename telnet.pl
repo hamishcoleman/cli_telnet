@@ -375,10 +375,7 @@ sub menu_send_check_echo {
     $conn->write_local("---sending---\n");
     while (!$fh->eof()) {
         my $ch = $fh->getc();
-        if (!defined($ch)) {
-            $conn->write_local("---done---\n");
-            return 1;
-        }
+        last if (!defined($ch));
 
         # HACK!
         if ($ch eq "\n") {
@@ -386,17 +383,23 @@ sub menu_send_check_echo {
         }
 
         $conn->write_remote($ch) || return 0;
-NL:
+READ:
         my $rx = $conn->read_remote(1);
+        if (length($rx) == 1 && ord($rx) == 0) {
+            # sometimes, it sends us nuls..
+            goto READ;
+        }
+
         if (length($rx) == 0) {
             $conn->write_local("---ZEROREAD---\n");
             return 1;
         }
         $conn->write_local($rx);
 
+        # HACK!
         if ($ch eq "\r") {
             $ch = "\n";
-            goto NL;
+            goto READ;
         }
 
         if ($ch ne $rx) {
@@ -404,6 +407,7 @@ NL:
             return 1;
         }
     }
+    $conn->write_local("---done---\n");
     return 1;
 }
 
