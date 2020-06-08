@@ -169,7 +169,7 @@ sub Echo {
     return $self->{flags}{WILL}{1};
 }
 
-package main;
+package Telnet::Connection;
 use warnings;
 use strict;
 
@@ -181,12 +181,30 @@ use FileHandle;
 # - allow missing Term::Readkey library
 use Term::ReadKey;
 
-sub do_connect {
-    my $host = shift;
-    my $port = shift;
+sub new {
+    my $class = shift;
+    my $self = {};
+    bless $self, $class;
+    $self->{options} = Telnet::Options->new();
+    $self->{local_raw} = undef;
+    return $self;
+}
 
-    my $ipaddr   = inet_aton($host);
-    my $sockaddr = sockaddr_in($port, $ipaddr);
+sub hostname {
+    my $self = shift;
+    $self->{host} = shift;
+}
+
+sub port {
+    my $self = shift;
+    $self->{port} = shift;
+}
+
+sub connect {
+    my $self = shift;
+
+    my $ipaddr   = inet_aton($self->{host});
+    my $sockaddr = sockaddr_in($self->{port}, $ipaddr);
     my $proto = getprotobyname('tcp');
     my $fh    = new FileHandle;
 
@@ -197,10 +215,21 @@ sub do_connect {
             die "connect error";
     }
     $fh->autoflush(1);
-    return $fh;
+
+    my $stdin_fileno = fileno(*STDIN);
+    my $sock_fileno = fileno($fh);
+
+    # Set up for select
+    my $readfds_init = "";
+    vec($readfds_init, $stdin_fileno, 1) = 1;
+    vec($readfds_init,  $sock_fileno, 1) = 1;
+
+    $self->{readfds_init} = $readfds_init;
+    $self->{remote} = $fh;
 }
 
-sub syswrite_all {
+# Try hard to write the whole buf
+sub _write {
     my $fh = shift;
     my $buf = shift;
 
@@ -215,15 +244,126 @@ sub syswrite_all {
     return 1;
 }
 
+sub write_local {
+    my $self = shift;
+    my $buf = shift;
+    return _write(\*STDOUT, $buf);
+}
+
+sub write_remote {
+    my $self = shift;
+    my $buf = shift;
+    return _write($self->{remote}, $buf);
+}
+
+sub read_local {
+    my $self = shift;
+    my $buf;
+    sysread(\*STDIN, $buf, 1024);
+    return $buf;
+}
+
+sub read_remote {
+    my $self = shift;
+    my $buf;
+    sysread($self->{remote}, $buf, 1024);
+    return $buf;
+}
+
+sub loop {
+    my $self = shift;
+
+    if ($self->{local_raw}) {
+        ReadMode('raw');
+    }
+
+    # TODO:
+    # - repeating ourselves from self->connect()
+    my $stdin_fileno = fileno(*STDIN);
+    my $sock_fileno = fileno($self->{remote});
+
+    # Loop, reading from one socket and writing to the other like a good
+    # proxy program
+    while(1) {
+        my $readfds = $self->{readfds_init};
+        my $exceptfds = $self->{readfds_init};
+
+        my $nfound = select($readfds, undef, $exceptfds, 1024);
+        if ($nfound == 0) {
+            next;
+        }
+
+        # if either these have their error flag set, exit
+        return 0 if (vec($exceptfds, $stdin_fileno, 1));
+        return 0 if (vec($exceptfds, $sock_fileno, 1));
+
+        # reading from user
+        if (vec($readfds, $stdin_fileno, 1)) {
+            my $buf = $self->read_local();
+            length($buf) || return 0;
+
+            # Again, we are cheating, since we assume interesting things are
+            # only in the first byte
+            #
+            # TODO:
+            # - maybe allow disabling the escape code
+            #
+            # if buf contains local interrupt, handle that
+            if (ord(substr($buf,0,1)) == 0x1d) {
+                ReadMode('restore');
+                # return to user code to handle the escape sequence
+                # (Note that we throw away the whole buffer here)
+                return 1;
+            }
+
+            # TODO:
+            # - local_raw changes all of "signals", "line_mode" and "NL to CR"
+            if ($self->{local_raw} && substr($buf,0,1) eq "\n") {
+                substr($buf,0,1) = "\r";
+            }
+
+            $self->write_remote($buf) || return 0;
+        }
+
+        # reading from network
+        if (vec($readfds, $sock_fileno, 1)) {
+            my $buf = $self->read_remote();
+            length($buf) || return 0;
+
+            $buf = $self->{options}->parse($buf);
+            my $reply = $self->{options}->get_reply();
+            if ($reply) {
+                $self->write_remote($reply) || return 0;
+            }
+
+            # After processing options, check if the Echo is now defined
+            # Kind of a hack, but if the far end is echoing, we should send
+            # all chars to it
+            if (!defined($self->{local_raw}) && $self->{options}->Echo()) {
+                ReadMode('raw');
+                $self->{local_raw} = 1;
+            }
+
+            $self->write_local($buf) || return 0;
+        }
+    }
+}
+
+package main;
+use warnings;
+use strict;
+
 my $menu_entries;
 
 sub menu_help {
+    my $conn = shift;
+
     my $buf = '';
     $buf .= "Commands:\n\n";
     for my $name (sort(keys(%{$menu_entries}))) {
         $buf .= $name . "\n";
     }
-    syswrite_all(\*STDOUT, $buf);
+    $conn->write_local($buf);
     return 1;
 }
 
@@ -240,9 +380,9 @@ $menu_entries->{h} = $menu_entries->{help};
 $menu_entries->{q} = $menu_entries->{quit};
 
 sub menu {
-    syswrite_all(\*STDOUT, "telnet.pl> ");
-    my $buf;
-    sysread(\*STDIN, $buf, 1024);
+    my $conn = shift;
+    $conn->write_local("telnet.pl> ");
+    my $buf = $conn->read_local();
     chomp $buf;
 
     if (!$buf) {
@@ -251,17 +391,17 @@ sub menu {
     }
 
     if (defined($menu_entries->{$buf})) {
-        my $result = $menu_entries->{$buf}();
+        my $result = $menu_entries->{$buf}($conn);
         if ($result == 0) {
             # request exit program
             return 0;
         }
     } else {
-        syswrite_all(\*STDOUT, "Invalid command: ".$buf."\n");
+        $conn->write_local("Invalid command: ".$buf."\n");
     }
 
     # Tail recurse for more commands
-    return menu();
+    return menu($conn);
 }
 
 
@@ -269,83 +409,21 @@ sub main {
     my $host = shift @ARGV || die "Remote host not supplied";;
     my $port = shift @ARGV || 23;
 
-    my $fh = do_connect($host, $port);
+    my $conn = Telnet::Connection->new();
+    $conn->hostname($host);
+    $conn->port($port);
+    $conn->connect();
 
-    my $options = Telnet::Options->new();
-    my $opt_echo = undef;
-
-    my $stdin_fileno = fileno(*STDIN);
-    my $sock_fileno = fileno($fh);
-
-    # Set up for select
-    my $readfds_init = "";
-    vec($readfds_init, $stdin_fileno, 1) = 1;
-    vec($readfds_init,  $sock_fileno, 1) = 1;
-    my $exceptfds_init = $readfds_init;
-
-    # Loop, reading from one socket and writing to the other like a good
-    # proxy program
-    SELECT:
     while(1) {
-        my $readfds = $readfds_init;
-        my $exceptfds = $exceptfds_init;
-        my $nfound = select($readfds, undef, $exceptfds, 1024);
-        if ($nfound == 0) {
-            next;
+        if ($conn->loop() == 0) {
+            last;
         }
 
-        # if either these have their error flag set, exit
-        if (vec($exceptfds, $stdin_fileno, 1)) { last SELECT; }
-        if (vec($exceptfds, $sock_fileno, 1)) { last SELECT; }
-
-        if (vec($readfds, $stdin_fileno, 1)) {
-            # reading from user
-            my $buf;
-            sysread(\*STDIN, $buf, 1024);
-            length($buf) || last SELECT;
-
-            # Again, we are cheating, since we assume interesting things are
-            # only in the first byte
-            #
-            # if buf contains local interrupt, handle that
-            if (ord(substr($buf,0,1)) == 0x1d) {
-                ReadMode('restore') if ($opt_echo);
-                menu() || last SELECT;
-                ReadMode('raw') if ($opt_echo);
-                next;
-            }
-
-            if ($opt_echo && substr($buf,0,1) eq "\n") {
-                substr($buf,0,1) = "\r";
-            }
-
-            syswrite_all($fh, $buf) || last SELECT;
-        }
-        if (vec($readfds, $sock_fileno, 1)) {
-            # reading from network
-            my $buf;
-            sysread($fh, $buf, 1024);
-            length($buf) || last SELECT;
-
-            $buf = $options->parse($buf);
-            my $reply = $options->get_reply();
-            if ($reply) {
-                syswrite_all($fh, $reply) || last SELECT;
-            }
-            if (!defined($opt_echo) && $options->Echo()) {
-                # Kind of a hack, but if the far end is echoing, we should send
-                # all chars to it
-                ReadMode('raw');
-                $opt_echo = 1;
-            }
-
-            syswrite_all(\*STDOUT, $buf) || last SELECT;
+        if (menu($conn) == 0) {
+            last;
         }
     }
 
-    $fh->close();
-
-    ReadMode(0);
     exit(0);
 }
 unless(caller) { main(); }
