@@ -215,21 +215,53 @@ sub syswrite_all {
     return 1;
 }
 
+my $menu_entries;
+
+sub menu_help {
+    my $buf = '';
+    $buf .= "Commands:\n\n";
+    for my $name (sort(keys(%{$menu_entries}))) {
+        $buf .= $name . "\n";
+    }
+    syswrite_all(\*STDOUT, $buf);
+    return 1;
+}
+
+sub menu_quit {
+    return 0;
+}
+
+$menu_entries = {
+    help => \&menu_help,
+    quit => \&menu_quit,
+};
+$menu_entries->{'?'} = $menu_entries->{help};
+$menu_entries->{h} = $menu_entries->{help};
+$menu_entries->{q} = $menu_entries->{quit};
+
 sub menu {
     syswrite_all(\*STDOUT, "telnet.pl> ");
-
     my $buf;
     sysread(\*STDIN, $buf, 1024);
-
     chomp $buf;
+
     if (!$buf) {
+        # return to telnet session
         return 1;
     }
-    if ($buf eq 'q') {
-        return 0;
+
+    if (defined($menu_entries->{$buf})) {
+        my $result = $menu_entries->{$buf}();
+        if ($result == 0) {
+            # request exit program
+            return 0;
+        }
+    } else {
+        syswrite_all(\*STDOUT, "Invalid command: ".$buf."\n");
     }
-    syswrite_all(\*STDOUT, "Invalid command: ".$buf."\n");
-    return 1;
+
+    # Tail recurse for more commands
+    return menu();
 }
 
 
