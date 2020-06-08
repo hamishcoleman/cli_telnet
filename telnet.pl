@@ -175,6 +175,7 @@ use strict;
 
 use Socket;
 use FileHandle;
+use IO::Select;
 
 # FIXME: install a whole library for one function?
 # TODO:
@@ -187,6 +188,7 @@ sub new {
     bless $self, $class;
     $self->{options} = Telnet::Options->new();
     $self->{local_raw} = undef;
+    $self->{select} = IO::Select->new();
     return $self;
 }
 
@@ -216,15 +218,9 @@ sub connect {
     }
     $fh->autoflush(1);
 
-    my $stdin_fileno = fileno(*STDIN);
-    my $sock_fileno = fileno($fh);
+    $self->{select}->add(\*STDIN);
+    $self->{select}->add($fh);
 
-    # Set up for select
-    my $readfds_init = "";
-    vec($readfds_init, $stdin_fileno, 1) = 1;
-    vec($readfds_init,  $sock_fileno, 1) = 1;
-
-    $self->{readfds_init} = $readfds_init;
     $self->{remote} = $fh;
 }
 
@@ -278,74 +274,59 @@ sub loop {
         ReadMode('raw');
     }
 
-    # TODO:
-    # - repeating ourselves from self->connect()
-    my $stdin_fileno = fileno(*STDIN);
-    my $sock_fileno = fileno($self->{remote});
-
     # Loop, reading from one socket and writing to the other like a good
     # proxy program
-    while(1) {
-        my $readfds = $self->{readfds_init};
-        my $exceptfds = $self->{readfds_init};
+    LOOP:
+    while(my @can_r = $self->{select}->can_read()) {
+        for my $fh (@can_r) {
+            if ($fh != $self->{remote}) {
+                # reading from local user
+                my $buf = $self->read_local();
+                length($buf) || last LOOP;
 
-        my $nfound = select($readfds, undef, $exceptfds, 1024);
-        if ($nfound == 0) {
-            next;
-        }
+                # Again, we are cheating, since we assume interesting things
+                # are only in the first byte
+                #
+                # TODO:
+                # - maybe allow disabling the escape code
+                #
+                # if buf contains local interrupt, handle that
+                if (ord(substr($buf,0,1)) == 0x1d) {
+                    ReadMode('restore');
+                    # return to user code to handle the escape sequence
+                    # (Note that we throw away the whole buffer here)
+                    return 1;
+                }
 
-        # if either these have their error flag set, exit
-        last if (vec($exceptfds, $stdin_fileno, 1));
-        last if (vec($exceptfds, $sock_fileno, 1));
+                # TODO:
+                # - local_raw controls the handling of all of "signals",
+                #   "line_mode" and "NL to CR"
+                if ($self->{local_raw} && substr($buf,0,1) eq "\n") {
+                    substr($buf,0,1) = "\r";
+                }
 
-        # reading from user
-        if (vec($readfds, $stdin_fileno, 1)) {
-            my $buf = $self->read_local();
-            length($buf) || last;
+                $self->write_remote($buf) || last LOOP;
+            } else {
+                # reading from network
+                my $buf = $self->read_remote();
+                length($buf) || last LOOP;
 
-            # Again, we are cheating, since we assume interesting things are
-            # only in the first byte
-            #
-            # TODO:
-            # - maybe allow disabling the escape code
-            #
-            # if buf contains local interrupt, handle that
-            if (ord(substr($buf,0,1)) == 0x1d) {
-                ReadMode('restore');
-                # return to user code to handle the escape sequence
-                # (Note that we throw away the whole buffer here)
-                return 1;
+                $buf = $self->{options}->parse($buf);
+                my $reply = $self->{options}->get_reply();
+                if ($reply) {
+                    $self->write_remote($reply) || last LOOP;
+                }
+
+                # After processing options, check if the Echo is now defined
+                # Kind of a hack, but if the far end is echoing, we should
+                # send all chars to it
+                if (!defined($self->{local_raw}) && $self->{options}->Echo()) {
+                    ReadMode('raw');
+                    $self->{local_raw} = 1;
+                }
+
+                $self->write_local($buf) || last LOOP;
             }
-
-            # TODO:
-            # - local_raw changes all of "signals", "line_mode" and "NL to CR"
-            if ($self->{local_raw} && substr($buf,0,1) eq "\n") {
-                substr($buf,0,1) = "\r";
-            }
-
-            $self->write_remote($buf) || last;
-        }
-
-        # reading from network
-        if (vec($readfds, $sock_fileno, 1)) {
-            my $buf = $self->read_remote();
-            length($buf) || last;
-
-            $buf = $self->{options}->parse($buf);
-            my $reply = $self->{options}->get_reply();
-            if ($reply) {
-                $self->write_remote($reply) || last;
-            }
-
-            # After processing options, check if the Echo is now defined
-            # Kind of a hack, but if the far end is echoing, we should send
-            # all chars to it
-            if (!defined($self->{local_raw}) && $self->{options}->Echo()) {
-                ReadMode('raw');
-                $self->{local_raw} = 1;
-            }
-
-            $self->write_local($buf) || last;
         }
     }
     ReadMode('restore');
