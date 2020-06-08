@@ -76,6 +76,7 @@ use constant {
     DONT     => 254,
     IAC      => 255,
 
+    OPT_ECHO     => 1,
     OPT_TERMTYPE => 24,
 };
 
@@ -126,6 +127,7 @@ sub _IAC_251 { # WILL
     my $option = $self->_bufget();
 
     $self->_send(IAC, DO, $option);
+    $self->{flags}{WILL}{$option} = 1;
 }
 
 sub _IAC_253 {  # DO
@@ -162,6 +164,11 @@ sub parse {
     return $self->_bufret();
 }
 
+sub Echo {
+    my $self = shift;
+    return $self->{flags}{WILL}{1};
+}
+
 package main;
 use warnings;
 use strict;
@@ -170,6 +177,8 @@ use Socket;
 use FileHandle;
 
 # FIXME: install a whole library for one function?
+# TODO:
+# - allow missing Term::Readkey library
 use Term::ReadKey;
 
 sub do_connect {
@@ -213,11 +222,7 @@ sub main {
     my $fh = do_connect($host, $port);
 
     my $options = Telnet::Options->new();
-
-    # TODO:
-    # - optionally do not turn on raw mode
-    # - allow missing Term::Readkey library
-    ReadMode('raw');
+    my $opt_echo = undef;
 
     my $stdin_fileno = fileno(*STDIN);
     my $sock_fileno = fileno($fh);
@@ -249,11 +254,16 @@ sub main {
             sysread(\*STDIN, $buf, 1024);
             length($buf) || last SELECT;
 
+            # Again, we are cheating, since we assume interesting things are
+            # only in the first byte
+            #
             # if buf contains local interrupt, handle that
             if (ord(substr($buf,0,1)) == 0x1d) {
                 # TODO:
                 # - local menu
                 last SELECT;
+            } elsif ($opt_echo && substr($buf,0,1) eq "\n") {
+                substr($buf,0,1) = "\r";
             }
 
             syswrite_all($fh, $buf) || last SELECT;
@@ -268,6 +278,12 @@ sub main {
             my $reply = $options->get_reply();
             if ($reply) {
                 syswrite_all($fh, $reply) || last SELECT;
+            }
+            if (!defined($opt_echo) && $options->Echo()) {
+                # Kind of a hack, but if the far end is echoing, we should send
+                # all chars to it
+                ReadMode('raw');
+                $opt_echo = 1;
             }
 
             syswrite_all(\*STDOUT, $buf) || last SELECT;
