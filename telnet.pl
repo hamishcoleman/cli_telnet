@@ -172,7 +172,7 @@ sub parse {
 
 sub Echo {
     my $self = shift;
-    return $self->{flags}{WILL}{1};
+    return $self->{flags}{WILL}{OPT_ECHO};
 }
 
 package Telnet::Connection;
