@@ -557,11 +557,124 @@ sub remote_rx {
     $conn->write_local(".:".$buf.":.");
 }
 
+package Intercept::send_chars_check;
+use warnings;
+use strict;
+
+sub new {
+    my $class = shift;
+    my $self = {};
+    bless $self, $class;
+    return $self;
+}
+
+sub start {
+    my $self = shift;
+    my $conn = shift;
+    my $filename = shift;
+
+    my $fh = FileHandle->new($filename, "r");
+    if (!defined($fh)) {
+        $conn->write_local("Could not open $filename\n");
+        return 1;
+    }
+    $self->{conn} = $conn;
+    $self->{fh} = $fh;
+
+    $conn->copy_remote_rx($self);
+    $conn->write_local("---sending---\n");
+    $self->_send1();
+}
+
+sub _stop {
+    my $self = shift;
+    my $conn = $self->{conn};
+
+    $conn->write_local("---done---\n");
+    $conn->copy_remote_rx(undef);
+}
+
+sub _send1 {
+    my $self = shift;
+    my $conn = $self->{conn};
+
+    my $ch = $self->{fh}->getc();
+    if (!defined($ch)) {
+        $self->_stop();
+        return;
+    }
+
+    # HACK!
+    if ($ch eq "\n") {
+        $ch = "\r";
+    }
+
+    $self->{expect} = $ch;
+    $conn->write_remote($ch);
+}
+
+sub _recv1 {
+    my $self = shift;
+    my $conn = $self->{conn};
+    my $ch = shift;
+
+    if (ord($ch) == 0) {
+        # ignore null chars
+        return;
+    }
+
+    if (!defined($self->{expect})) {
+        $conn->write_local("---expect is null---\n");
+        $self->_stop();
+    }
+
+    if ($ch ne $self->{expect}) {
+        $conn->write_local("---MISMATCH---\n");
+        $self->_stop();
+    }
+
+    # HACK!
+    if ($ch eq "\r") {
+        $self->{expect} = "\n";
+        return;
+    }
+
+    # send next char
+    $self->_send1();
+}
+
+sub remote_rx {
+    my $self = shift;
+    my $conn = shift;
+    my $buf = shift;
+
+    for my $ch (split(//, $buf)) {
+        $self->_recv1($ch);
+    }
+}
+
 package main;
 use warnings;
 use strict;
 
 use FileHandle;
+
+sub ilist {
+    my $menu = shift;
+    my $conn = shift;
+
+    my $buf = '';
+    $buf .= "Intercepts:\n\n";
+
+    no strict;
+    for my $name (keys(%{*{"Intercept\::"}})) {
+        $name =~ y/://d;
+        $buf .= $name . "\n";
+    }
+    use strict;
+
+    $conn->write_local($buf);
+}
 
 sub iclear {
     my $menu = shift;
@@ -579,58 +692,12 @@ sub iset {
 
     my $intercept = $module->new();
     $intercept->start($conn, @_);
+
+    # FIXME:
+    # - the menu maybe should not prompt after attaching an intercept
+    # - the menu should be able to prompt after the intercept finishes..
 }
 
-
-sub menu_send_chars_check {
-    my $menu = shift;
-    my $conn = shift;
-    my $filename = shift;
-
-    my $fh = FileHandle->new($filename, "r");
-    if (!defined($fh)) {
-        $conn->write_local("Could not open\n");
-        return 1;
-    }
-
-    $conn->write_local("---sending---\n");
-    while (!$fh->eof()) {
-        my $ch = $fh->getc();
-        last if (!defined($ch));
-
-        # HACK!
-        if ($ch eq "\n") {
-            $ch = "\r";
-        }
-
-        $conn->write_remote($ch) || return 0;
-READ:
-        my $rx = $conn->read_remote(1);
-        if (length($rx) == 1 && ord($rx) == 0) {
-            # sometimes, it sends us nuls..
-            goto READ;
-        }
-
-        if (length($rx) == 0) {
-            $conn->write_local("---ZEROREAD---\n");
-            return 1;
-        }
-        $conn->write_local($rx);
-
-        # HACK!
-        if ($ch eq "\r") {
-            $ch = "\n";
-            goto READ;
-        }
-
-        if ($ch ne $rx) {
-            $conn->write_local("---MISMATCH---\n");
-            return 1;
-        }
-    }
-    $conn->write_local("---done---\n");
-    return 1;
-}
 
 sub menu_send_text_check {
     my $menu = shift;
@@ -721,9 +788,9 @@ sub main {
     my $port = shift @ARGV || 23;
 
     my $menu = Menu->new();
-    $menu->register('send_chars_check', \&menu_send_chars_check);
     $menu->register('send_text_check', \&menu_send_text_check);
 
+    $menu->register('ilist', \&ilist);
     $menu->register('iclear', \&iclear);
     $menu->register('iset', \&iset);
 
