@@ -428,6 +428,18 @@ sub add_buf {
     my $buf = shift;
 
     for my $ch (split(//, $buf)) {
+        if ($conn->{local_raw}) {
+            # need to echo
+            $conn->write_local($ch);
+        }
+
+        if ($ch eq "\x08" || $ch eq "\x7f") {
+            # we only get backspace in local raw mode
+            $conn->write_local(" \x08");
+            substr($self->{buf}, -1,1,'');
+            next;
+        }
+
         if ($ch eq "\r" || $ch eq "\n") {
             my $command = $self->{buf};
             $self->{buf} = '';
@@ -435,23 +447,9 @@ sub add_buf {
             next;
         }
 
-        if ($ch eq "\x08" || $ch eq "\x7f") {
-            # backspace
-            if ($conn->{local_raw}) {
-                # need to echo
-                $conn->write_local("\x08 \x08");
-            }
-            substr($self->{buf}, -1,1,'');
-            next;
-        }
-
         # TODO:
         # - could try to handle cmdline history etc too..
 
-        if ($conn->{local_raw}) {
-            # need to echo
-            $conn->write_local($ch);
-        }
         $self->{buf} .= $ch;
     }
 
