@@ -4,6 +4,12 @@ use strict;
 #
 # what kind of krazy hardening process removes telnet?
 #
+#
+# TODO:
+# - allow disabling the menu escape code
+# - Telnet::Connection local_raw controls the handling of all of "signals",
+#   "line_mode" and "NL to CR" - possibly need to break that out
+
 
 package Telnet::Options;
 use warnings;
@@ -283,6 +289,61 @@ sub read_remote {
     return $buf;
 }
 
+sub _loop_read_local {
+    my $self = shift;
+
+    my $buf = $self->read_local();
+    length($buf) || return 0;
+
+    # in menu mode, all local input goes to the menu
+    if ($self->{menumode}) {
+        $self->{menu}->add_buf($self, $buf);
+        return 1;
+    }
+
+    # Again, we are cheating, since we assume interesting
+    # things are only in the first byte.
+    #
+    # if buf contains local interrupt, handle that
+    if (ord(substr($buf,0,1)) == 0x1d) {
+        $self->menumode(1);
+        $self->{menu}->add_buf($self, substr($buf,1));
+        return 1;
+    }
+
+    # Ensure we send CR to remote
+    if ($self->{local_raw} && substr($buf,0,1) eq "\n") {
+        substr($buf,0,1) = "\r";
+    }
+
+    $self->write_remote($buf) || return 0;
+    return 1;
+}
+
+sub _loop_read_remote {
+    my $self = shift;
+
+    my $buf = $self->read_remote();
+    length($buf) || return 0;
+
+    $buf = $self->{options}->parse($buf);
+    my $reply = $self->{options}->get_reply();
+    if ($reply) {
+        $self->write_remote($reply) || return 0;
+    }
+
+    # After processing options, check if the Echo is now defined
+    # Kind of a hack, but if the far end is echoing, we should
+    # send all chars to it
+    if (!defined($self->{local_raw}) && $self->{options}->Echo()) {
+        ReadMode('raw');
+        $self->{local_raw} = 1;
+    }
+
+    $self->write_local($buf) || return 0;
+    return 1;
+}
+
 sub loop {
     my $self = shift;
 
@@ -310,53 +371,10 @@ sub loop {
         for my $fh (@can_r) {
             if ($fh != $self->{remote}) {
                 # reading from local user
-                my $buf = $self->read_local();
-                length($buf) || last LOOP;
-
-                if ($self->{menumode}) {
-                    # in menu mode, all user input goes to the menu
-                    $self->{menu}->add_buf($self, $buf);
-                } elsif (ord(substr($buf,0,1)) == 0x1d) {
-                    # Again, we are cheating, since we assume interesting
-                    # things are only in the first byte
-                    #
-                    # TODO:
-                    # - allow disabling the escape code
-                    #
-                    # if buf contains local interrupt, handle that
-                    $self->menumode(1);
-                    $self->{menu}->add_buf($self, substr($buf,1));
-                } else {
-
-                    # TODO:
-                    # - local_raw controls the handling of all of "signals",
-                    #   "line_mode" and "NL to CR"
-                    if ($self->{local_raw} && substr($buf,0,1) eq "\n") {
-                        substr($buf,0,1) = "\r";
-                    }
-
-                    $self->write_remote($buf) || last LOOP;
-                }
+                $self->_loop_read_local() || last LOOP;
             } else {
                 # reading from network
-                my $buf = $self->read_remote();
-                length($buf) || last LOOP;
-
-                $buf = $self->{options}->parse($buf);
-                my $reply = $self->{options}->get_reply();
-                if ($reply) {
-                    $self->write_remote($reply) || last LOOP;
-                }
-
-                # After processing options, check if the Echo is now defined
-                # Kind of a hack, but if the far end is echoing, we should
-                # send all chars to it
-                if (!defined($self->{local_raw}) && $self->{options}->Echo()) {
-                    ReadMode('raw');
-                    $self->{local_raw} = 1;
-                }
-
-                $self->write_local($buf) || last LOOP;
+                $self->_loop_read_remote() || last LOOP;
             }
         }
     }
