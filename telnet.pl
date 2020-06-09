@@ -478,15 +478,15 @@ sub command {
         return;
     }
 
-    # TODO:
-    # - parse into command and args
+    my @args = split(/\s+/, $line);
+    my $cmd = shift @args;
 
-    if (!defined($self->{entries}{$line})) {
-        $conn->write_local("Invalid command: ".$line."\n");
+    if (!defined($self->{entries}{$cmd})) {
+        $conn->write_local("Invalid command: ".$cmd."\n");
         return;
     }
 
-    $self->{entries}->{$line}($self,$conn);
+    $self->{entries}->{$cmd}($self,$conn,@args);
 }
 
 sub register {
@@ -526,9 +526,7 @@ use FileHandle;
 sub menu_send_chars_check {
     my $menu = shift;
     my $conn = shift;
-    $conn->write_local("filename? ");
-    my $filename = $conn->read_local();
-    chomp($filename);
+    my $filename = shift;
 
     my $fh = FileHandle->new($filename, "r");
     if (!defined($fh)) {
@@ -578,17 +576,10 @@ READ:
 sub menu_send_text_check {
     my $menu = shift;
     my $conn = shift;
-    $conn->write_local("maxbuf? ");
-    my $maxbuf = $conn->read_local();
-    chomp($maxbuf);
-    if (!$maxbuf) {
-        $maxbuf = 28;
-        $conn->write_local("maxbuf=$maxbuf\n");
-    }
+    my $filename = shift;
+    my $maxbuf = shift || 28;
 
-    $conn->write_local("filename? ");
-    my $filename = $conn->read_local();
-    chomp($filename);
+    $conn->write_local("maxbuf=$maxbuf\n");
 
     my $fh = FileHandle->new($filename, "r");
     if (!defined($fh)) {
