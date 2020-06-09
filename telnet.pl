@@ -248,6 +248,14 @@ sub local {
     return $self->{local};
 }
 
+sub copy_remote_rx {
+    my ($self, $set) = @_;
+    if (@_ == 2) {
+        $self->{copy_remote_rx} = $set;
+    }
+    return $self->{copy_remote_rx};
+}
+
 sub connect {
     my $self = shift;
 
@@ -359,6 +367,11 @@ sub _loop_read_remote {
     if (!defined($self->{local_raw}) && $self->{options}->Echo()) {
         ReadMode('raw');
         $self->{local_raw} = 1;
+    }
+
+    my $copy_remote_rx = $self->copy_remote_rx();
+    if (defined($copy_remote_rx)) {
+        $copy_remote_rx->remote_rx($self, $buf);
     }
 
     $self->write_local($buf) || return 0;
@@ -516,12 +529,58 @@ sub _quit {
     $conn->loop_stop();
 }
 
+package Intercept::test;
+use warnings;
+use strict;
+
+sub new {
+    my $class = shift;
+    my $self = {};
+    bless $self, $class;
+    return $self;
+}
+
+sub start {
+    my $self = shift;
+    my $conn = shift;
+    my $arg1 = shift;
+
+    $conn->write_local("start, arg1: ".$arg1."\n");
+    $conn->copy_remote_rx($self);
+}
+
+sub remote_rx {
+    my $self = shift;
+    my $conn = shift;
+    my $buf = shift;
+
+    $conn->write_local(".:".$buf.":.");
+}
 
 package main;
 use warnings;
 use strict;
 
 use FileHandle;
+
+sub iclear {
+    my $menu = shift;
+    my $conn = shift;
+
+    # Clear the intercept
+    $conn->copy_remote_rx(undef);
+}
+
+sub iset {
+    my $menu = shift;
+    my $conn = shift;
+    my $tail = shift;
+    my $module = "Intercept::" . $tail;
+
+    my $intercept = $module->new();
+    $intercept->start($conn, @_);
+}
+
 
 sub menu_send_chars_check {
     my $menu = shift;
@@ -664,6 +723,9 @@ sub main {
     my $menu = Menu->new();
     $menu->register('send_chars_check', \&menu_send_chars_check);
     $menu->register('send_text_check', \&menu_send_text_check);
+
+    $menu->register('iclear', \&iclear);
+    $menu->register('iset', \&iset);
 
     my $conn = Telnet::Connection->new();
     $conn->menu($menu);
