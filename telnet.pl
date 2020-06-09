@@ -189,6 +189,7 @@ sub new {
     $self->{options} = Telnet::Options->new();
     $self->{local_raw} = undef;
     $self->{select} = IO::Select->new();
+    $self->{loop_stop} = 0;
     return $self;
 }
 
@@ -200,6 +201,21 @@ sub hostname {
 sub port {
     my $self = shift;
     $self->{port} = shift;
+}
+
+sub menu {
+    my $self = shift;
+    $self->{menu} = shift;
+}
+
+sub menumode {
+    my $self = shift;
+    $self->{menumode} = shift;
+}
+
+sub loop_stop {
+    my $self = shift;
+    $self->{loop_stop} = 1;
 }
 
 sub connect {
@@ -277,35 +293,50 @@ sub loop {
     # Loop, reading from one socket and writing to the other like a good
     # proxy program
     LOOP:
-    while(my @can_r = $self->{select}->can_read()) {
+    while(!$self->{loop_stop}) {
+        if ($self->{menumode}) {
+            $self->{menu}->prompt($self);
+        }
+
+        $! = 0;
+        my @can_r = $self->{select}->can_read(10);
+        if (scalar(@can_r)==0) {
+            if ($! != 0) {
+                # an error occured
+                last LOOP;
+            }
+        }
+
         for my $fh (@can_r) {
             if ($fh != $self->{remote}) {
                 # reading from local user
                 my $buf = $self->read_local();
                 length($buf) || last LOOP;
 
-                # Again, we are cheating, since we assume interesting things
-                # are only in the first byte
-                #
-                # TODO:
-                # - maybe allow disabling the escape code
-                #
-                # if buf contains local interrupt, handle that
-                if (ord(substr($buf,0,1)) == 0x1d) {
-                    ReadMode('restore');
-                    # return to user code to handle the escape sequence
-                    # (Note that we throw away the whole buffer here)
-                    return 1;
-                }
+                if ($self->{menumode}) {
+                    # in menu mode, all user input goes to the menu
+                    $self->{menu}->add_buf($self, $buf);
+                } elsif (ord(substr($buf,0,1)) == 0x1d) {
+                    # Again, we are cheating, since we assume interesting
+                    # things are only in the first byte
+                    #
+                    # TODO:
+                    # - allow disabling the escape code
+                    #
+                    # if buf contains local interrupt, handle that
+                    $self->menumode(1);
+                    $self->{menu}->add_buf($self, substr($buf,1));
+                } else {
 
-                # TODO:
-                # - local_raw controls the handling of all of "signals",
-                #   "line_mode" and "NL to CR"
-                if ($self->{local_raw} && substr($buf,0,1) eq "\n") {
-                    substr($buf,0,1) = "\r";
-                }
+                    # TODO:
+                    # - local_raw controls the handling of all of "signals",
+                    #   "line_mode" and "NL to CR"
+                    if ($self->{local_raw} && substr($buf,0,1) eq "\n") {
+                        substr($buf,0,1) = "\r";
+                    }
 
-                $self->write_remote($buf) || last LOOP;
+                    $self->write_remote($buf) || last LOOP;
+                }
             } else {
                 # reading from network
                 my $buf = $self->read_remote();
@@ -333,15 +364,128 @@ sub loop {
     return 0;
 }
 
+package Menu;
+use warnings;
+use strict;
+
+sub new {
+    my $class = shift;
+    my $self = {};
+    bless $self, $class;
+    $self->{buf} = '';
+    $self->{need_prompt} = 0;
+    $self->register('help', \&_help);
+    $self->register('quit', \&_quit);
+    $self->register('q', \&_quit);
+    return $self;
+}
+
+# Add some bytes to the buffer to be processed, possibly causing actions
+sub add_buf {
+    my $self = shift;
+    my $conn = shift;
+    my $buf = shift;
+
+    for my $ch (split(//, $buf)) {
+        if ($ch eq "\r" || $ch eq "\n") {
+            my $command = $self->{buf};
+            $self->{buf} = '';
+            $self->command($conn, $command);
+            next;
+        }
+
+        if ($ch eq "\x08" || $ch eq "\x7f") {
+            # backspace
+            if ($conn->{local_raw}) {
+                # need to echo
+                $conn->write_local("\x08 \x08");
+            }
+            substr($self->{buf}, -1,1,'');
+            next;
+        }
+
+        # TODO:
+        # - could try to handle cmdline history etc too..
+
+        if ($conn->{local_raw}) {
+            # need to echo
+            $conn->write_local($ch);
+        }
+        $self->{buf} .= $ch;
+    }
+
+    if (length($self->{buf}) == 0) {
+        $self->{need_prompt} = 1;
+    }
+}
+
+sub prompt {
+    my $self = shift;
+    my $conn = shift;
+
+    if ($self->{need_prompt}==1) {
+        $conn->write_local("telnet.py> ");
+        $self->{need_prompt} = 0;
+    }
+}
+
+sub command {
+    my $self = shift;
+    my $conn = shift;
+    my $line = shift;
+
+    if (!$line) {
+        $conn->menumode(0);
+        return;
+    }
+
+    # TODO:
+    # - parse into command and args
+
+    if (!defined($self->{entries}{$line})) {
+        $conn->write_local("Invalid command: ".$line."\n");
+        return;
+    }
+
+    $self->{entries}->{$line}($self,$conn);
+}
+
+sub register {
+    my $self = shift;
+    my $name = shift;
+    my $func = shift;
+
+    $self->{entries}{$name} = $func;
+}
+
+sub _help {
+    my $menu = shift;
+    my $conn = shift;
+
+    my $buf = '';
+    $buf .= "Commands:\n\n";
+    for my $name (sort(keys(%{$menu->{entries}}))) {
+        $buf .= $name . "\n";
+    }
+    $conn->write_local($buf);
+}
+
+sub _quit {
+    my $menu = shift;
+    my $conn = shift;
+
+    $conn->loop_stop();
+}
+
+
 package main;
 use warnings;
 use strict;
 
 use FileHandle;
 
-my $menu_entries;
-
 sub menu_send_chars_check {
+    my $menu = shift;
     my $conn = shift;
     $conn->write_local("filename? ");
     my $filename = $conn->read_local();
@@ -393,6 +537,7 @@ READ:
 }
 
 sub menu_send_text_check {
+    my $menu = shift;
     my $conn = shift;
     $conn->write_local("maxbuf? ");
     my $maxbuf = $conn->read_local();
@@ -482,77 +627,21 @@ READ:
     return 1;
 }
 
-sub menu_help {
-    my $conn = shift;
-
-    my $buf = '';
-    $buf .= "Commands:\n\n";
-    for my $name (sort(keys(%{$menu_entries}))) {
-        $buf .= $name . "\n";
-    }
-    $conn->write_local($buf);
-    return 1;
-}
-
-sub menu_quit {
-    return 0;
-}
-
-$menu_entries = {
-    send_chars_check => \&menu_send_chars_check,
-    send_text_check=> \&menu_send_text_check,
-    help => \&menu_help,
-    quit => \&menu_quit,
-};
-$menu_entries->{'?'} = $menu_entries->{help};
-$menu_entries->{h} = $menu_entries->{help};
-$menu_entries->{q} = $menu_entries->{quit};
-
-sub menu {
-    my $conn = shift;
-    $conn->write_local("telnet.pl> ");
-    my $buf = $conn->read_local();
-    chomp $buf;
-
-    if (!$buf) {
-        # return to telnet session
-        return 1;
-    }
-
-    if (defined($menu_entries->{$buf})) {
-        my $result = $menu_entries->{$buf}($conn);
-        if ($result == 0) {
-            # request exit program
-            return 0;
-        }
-    } else {
-        $conn->write_local("Invalid command: ".$buf."\n");
-    }
-
-    # Tail recurse for more commands
-    return menu($conn);
-}
-
-
 sub main {
     my $host = shift @ARGV || die "Remote host not supplied";;
     my $port = shift @ARGV || 23;
 
+    my $menu = Menu->new();
+    $menu->register('send_chars_check', \&menu_send_chars_check);
+    $menu->register('send_text_check', \&menu_send_text_check);
+
     my $conn = Telnet::Connection->new();
+    $conn->menu($menu);
     $conn->hostname($host);
     $conn->port($port);
     $conn->connect();
 
-    while(1) {
-        if ($conn->loop() == 0) {
-            last;
-        }
-
-        if (menu($conn) == 0) {
-            last;
-        }
-    }
-
+    $conn->loop();
     exit(0);
 }
 unless(caller) { main(); }
