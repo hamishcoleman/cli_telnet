@@ -172,7 +172,7 @@ sub parse {
 
 sub Echo {
     my $self = shift;
-    return $self->{flags}{WILL}{OPT_ECHO};
+    return $self->{flags}{WILL}{OPT_ECHO()};
 }
 
 package Telnet::Connection;
@@ -196,6 +196,10 @@ sub new {
     $self->{local_raw} = undef;
     $self->{select} = IO::Select->new();
     $self->{loop_stop} = 0;
+
+    # Default to STDIN for local
+    $self->local(\*STDIN);
+
     return $self;
 }
 
@@ -224,6 +228,26 @@ sub loop_stop {
     $self->{loop_stop} = 1;
 }
 
+sub remote {
+    my $self = shift;
+    my $set = shift;
+    if (defined($set)) {
+        $self->{remote} = $set;
+        $self->{select}->add($set);
+    }
+    return $self->{remote};
+}
+
+sub local {
+    my $self = shift;
+    my $set = shift;
+    if (defined($set)) {
+        $self->{local} = $set;
+        $self->{select}->add($set);
+    }
+    return $self->{local};
+}
+
 sub connect {
     my $self = shift;
 
@@ -239,11 +263,7 @@ sub connect {
             die "connect error";
     }
     $fh->autoflush(1);
-
-    $self->{select}->add(\*STDIN);
-    $self->{select}->add($fh);
-
-    $self->{remote} = $fh;
+    $self->remote($fh);
 }
 
 # Try hard to write the whole buf
@@ -265,19 +285,20 @@ sub _write {
 sub write_local {
     my $self = shift;
     my $buf = shift;
+    # we dont use $self->local(), because that is STDIN
     return _write(\*STDOUT, $buf);
 }
 
 sub write_remote {
     my $self = shift;
     my $buf = shift;
-    return _write($self->{remote}, $buf);
+    return _write($self->remote(), $buf);
 }
 
 sub read_local {
     my $self = shift;
     my $buf;
-    sysread(\*STDIN, $buf, 1024);
+    sysread($self->local(), $buf, 1024);
     return $buf;
 }
 
@@ -285,7 +306,7 @@ sub read_remote {
     my $self = shift;
     my $buflen = shift || 1024;
     my $buf;
-    sysread($self->{remote}, $buf, $buflen);
+    sysread($self->remote(), $buf, $buflen);
     return $buf;
 }
 
@@ -369,10 +390,12 @@ sub loop {
         }
 
         for my $fh (@can_r) {
-            if ($fh != $self->{remote}) {
+            if ($fh == $self->local()) {
                 # reading from local user
                 $self->_loop_read_local() || last LOOP;
-            } else {
+            }
+
+            if ($fh == $self->remote()) {
                 # reading from network
                 $self->_loop_read_remote() || last LOOP;
             }
