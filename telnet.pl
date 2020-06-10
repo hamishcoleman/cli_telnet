@@ -492,7 +492,7 @@ sub command {
     }
 
     my @args = split(/\s+/, $line);
-    my $cmd = shift @args;
+    my $cmd = shift @args || '';
 
     if (!defined($self->{entries}{$cmd})) {
         $conn->write_local("Invalid command: ".$cmd."\n");
