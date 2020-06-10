@@ -653,6 +653,136 @@ sub remote_rx {
     }
 }
 
+package Intercept::send_text_check;
+use warnings;
+use strict;
+
+sub new {
+    my $class = shift;
+    my $self = {};
+    bless $self, $class;
+    return $self;
+}
+
+sub start {
+    my $self = shift;
+    my $conn = shift;
+    my $filename = shift;
+    my $segsize = shift || 28;
+
+    my $fh = FileHandle->new($filename, "r");
+    if (!defined($fh)) {
+        $conn->write_local("Could not open $filename\n");
+        return 1;
+    }
+    $self->{conn} = $conn;
+    $self->{fh} = $fh;
+    $self->{buf} = '';
+    $self->{segsize} = $segsize;
+
+    $conn->copy_remote_rx($self);
+    $conn->write_local("---sending---\n");
+    $self->_send_segment();
+}
+
+sub _stop {
+    my $self = shift;
+    my $conn = $self->{conn};
+
+    # Note that the done message will be output one buffer earlier than
+    # expected in the local users display stream.
+    # - the intercept is called before the $conn->write_local()
+    #   (this ordering would in future allow the intercept to edit what
+    #   the user can see - useful for a binary protocol, like xmodem)
+    # TODO:
+    # - see if we can think of a way around this ordering issue
+
+    $conn->write_local("---done---\n");
+    $conn->copy_remote_rx(undef);
+}
+
+sub _send_segment {
+    my $self = shift;
+    my $conn = $self->{conn};
+
+    if (length($self->{buf}) == 0) {
+        my $nextline = $self->{fh}->getline();
+
+        # check for end of file
+        if (!defined($nextline)) {
+            $self->_stop();
+            return;
+        }
+
+        # Assume file has standard end of lines
+        chomp($nextline);
+
+        $self->{buf} = $nextline;
+
+        if (length($nextline) >80) {
+            $conn->write_local("---WARN: line >80 chars---\n");
+            # the far end performing echo may wordwrap, which will wierd us
+        }
+    }
+
+    my $segment = substr($self->{buf}, 0, $self->{segsize}, '');
+    $self->{expect} = $segment;
+
+    if (length($self->{buf}) == 0) {
+        # this is the last segment in this line
+        # also send the remote end expected end of line char
+        $segment .= "\r";
+    }
+
+    $conn->write_remote($segment);
+}
+
+sub remote_rx {
+    my $self = shift;
+    my $conn = shift;
+    my $buf = shift;
+
+    if (length($buf) == 0) {
+        # eh?
+        return;
+    }
+
+    my @chars = split(//, $buf);
+
+    for my $ch (@chars) {
+        next if ($ch eq "\x00"); # simply skip nulls
+
+        if ($ch eq "\r" || $ch eq "\n") {
+            # only valid if we are expecting nothimg more
+            if (length($self->{expect}) != 0) {
+                $conn->write_local("---line end but expect: ".$self->{expect}."---\n");
+                $self->_stop();
+                return;
+            }
+
+            next;
+        }
+
+        my $expect_ch = substr($self->{expect}, 0, 1);
+        if ($ch ne $expect_ch) {
+            $conn->write_local("---expect $expect_ch, got $ch---\n");
+            $self->_stop();
+            return;
+        }
+
+        substr($self->{expect}, 0, 1, '');
+    }
+
+    # TODO:
+    # - if we did get a \r or a \n, confirm that we are at the end of a line
+    # - if we are at the end of a line, confirm that we got a \r or a \n
+
+    # if we have nothing more to expect, start sending the next segment
+    if (length($self->{expect}) == 0) {
+        $self->_send_segment();
+    }
+}
+
 package main;
 use warnings;
 use strict;
@@ -667,7 +797,7 @@ sub ilist {
     $buf .= "Intercepts:\n\n";
 
     no strict;
-    for my $name (keys(%{*{"Intercept\::"}})) {
+    for my $name (sort(keys(%{*{"Intercept\::"}}))) {
         $name =~ y/://d;
         $buf .= $name . "\n";
     }
@@ -699,97 +829,11 @@ sub iset {
 }
 
 
-sub menu_send_text_check {
-    my $menu = shift;
-    my $conn = shift;
-    my $filename = shift;
-    my $maxbuf = shift || 28;
-
-    $conn->write_local("maxbuf=$maxbuf\n");
-
-    my $fh = FileHandle->new($filename, "r");
-    if (!defined($fh)) {
-        $conn->write_local("Could not open\n");
-        return 1;
-    }
-
-    $conn->write_local("---sending---\n");
-    while (<$fh>) {
-        my $retries = 0;
-RETRY:
-        $retries ++;
-        if ($retries > 3) {
-            $conn->write_local("---TOOMANY---n");
-            return 1;
-        }
-        my $tosend = $_;
-        chomp($tosend);
-
-        while (length($tosend)) {
-            my $send = substr($tosend, 0, $maxbuf);
-            $conn->write_remote($send) || return 0;
-
-            my $tocheck = $send;
-            while (length($tocheck)) {
-                my $rx = $conn->read_remote();
-                $conn->write_local($rx);
-
-                # HACK
-                # FIXME - it does wierd when line is >80char
-                while (substr($rx, 0, 1) eq "\r") { $rx = substr($rx, 1); }
-                while (substr($rx, 0, 1) eq "\x00") { $rx = substr($rx, 1); }
-                while (substr($rx, 0, 1) eq "\n") { $rx = substr($rx, 1); }
-
-                my $check = substr($tocheck, 0, length($rx));
-                if ($rx ne $check) {
-                    $conn->write_local("---BAD:$check---\n");
-
-                    goto RETRY;
-                    return 1;
-                }
-                $tocheck = substr($tocheck, length($rx));
-            }
-
-            $tosend = substr($tosend, length($send));
-        }
-
-        my $ch = "\r";
-        $conn->write_remote($ch);
-READ:
-        my $rx = $conn->read_remote(1);
-        if (length($rx) == 0) {
-            $conn->write_local("---ZEROREAD---\n");
-            return 1;
-        }
-        if (length($rx) == 1 && ord($rx) == 0) {
-            # sometimes, it sends us nuls..
-            goto READ;
-        }
-
-        $conn->write_local($rx);
-
-        if ($ch ne $rx) {
-            $conn->write_local("---MISMATCH---\n");
-            return 1;
-        }
-
-        if ($ch eq "\r") {
-            $ch = "\n";
-            goto READ;
-        }
-
-    }
-    $conn->write_local("---done---\n");
-    return 1;
-}
-
 sub main {
     my $host = shift @ARGV || die "Remote host not supplied";;
     my $port = shift @ARGV || 23;
 
     my $menu = Menu->new();
-    $menu->register('send_text_check', \&menu_send_text_check);
-
     $menu->register('ilist', \&ilist);
     $menu->register('iclear', \&iclear);
     $menu->register('iset', \&iset);
