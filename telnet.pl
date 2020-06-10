@@ -716,6 +716,8 @@ sub _send_segment {
 
         # Assume file has standard end of lines
         chomp($nextline);
+        # but add the remote end expected end of line char
+        $nextline .= "\r";
 
         $self->{buf} = $nextline;
 
@@ -727,12 +729,6 @@ sub _send_segment {
 
     my $segment = substr($self->{buf}, 0, $self->{segsize}, '');
     $self->{expect} = $segment;
-
-    if (length($self->{buf}) == 0) {
-        # this is the last segment in this line
-        # also send the remote end expected end of line char
-        $segment .= "\r";
-    }
 
     $conn->write_remote($segment);
 }
@@ -751,17 +747,7 @@ sub remote_rx {
 
     for my $ch (@chars) {
         next if ($ch eq "\x00"); # simply skip nulls
-
-        if ($ch eq "\r" || $ch eq "\n") {
-            # only valid if we are expecting nothimg more
-            if (length($self->{expect}) != 0) {
-                $conn->write_local("---line end but expect: ".$self->{expect}."---\n");
-                $self->_stop();
-                return;
-            }
-
-            next;
-        }
+        next if ($ch eq "\n");   # also skip the wrong one of the EOL chars
 
         my $expect_ch = substr($self->{expect}, 0, 1);
         if ($ch ne $expect_ch) {
@@ -772,10 +758,6 @@ sub remote_rx {
 
         substr($self->{expect}, 0, 1, '');
     }
-
-    # TODO:
-    # - if we did get a \r or a \n, confirm that we are at the end of a line
-    # - if we are at the end of a line, confirm that we got a \r or a \n
 
     # if we have nothing more to expect, start sending the next segment
     if (length($self->{expect}) == 0) {
