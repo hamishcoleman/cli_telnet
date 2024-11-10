@@ -9,6 +9,10 @@ use strict;
 # - allow disabling the menu escape code
 # - Telnet::Connection local_raw controls the handling of all of "signals",
 #   "line_mode" and "NL to CR" - possibly need to break that out
+#
+# :dotsctl:
+#   destdir: ~/bin/
+# ...
 
 
 package Telnet::Options;
